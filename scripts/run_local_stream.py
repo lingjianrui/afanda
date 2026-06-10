@@ -3,7 +3,7 @@
 
 """Top-level orchestrator: renderer subprocess + health-poll + streamer.
 
-Spawns the afanda_renderer FastAPI app under the renderer env (`pixi run -e default
+Spawns the afanda_renderer FastAPI app under the renderer env (`pixi run -e renderer
 python -m afanda_renderer.api.app`), polls `GET /health` until it returns 200,
 then spawns the localrtc streamer (`python -m avaturn_live_streamer.local_stream_cli`).
 Both children inherit env so AFANDA_LOCAL_STORAGE / CLOUDFLARE_TURN_* propagate
@@ -53,7 +53,7 @@ def _start_renderer(port: int) -> subprocess.Popen[bytes]:
     # Disable the LB keep-alive worker -- there is no LB in the local setup.
     env.setdefault("LOAD_BALANCER_URL", "disabled")
     cmd = [
-        "pixi", "run", "-e", "default",
+        "pixi", "run", "-e", "renderer",
         "python", "-m", "uvicorn",
         "afanda_renderer.api.app:app",
         "--host", "0.0.0.0",

@@ -104,6 +104,7 @@ aiortc = ">=1.9.0"
 av = ">=12.0.0"
 anyio = ">=4.0"
 uuid6 = "*"
+python-dotenv = ">=1.0,<2"
 
 [environments]
 # `renderer` is listed first → pixi treats it as the default environment.

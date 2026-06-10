@@ -1,0 +1,13 @@
+.git
+.gitignore
+**/__pycache__
+**/*.py[cod]
+**/.pytest_cache
+**/.ruff_cache
+**/.pixi
+artifacts
+afanda_model.tar.gz
+*.tar.gz
+.env
+*.md
+example
