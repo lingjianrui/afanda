@@ -339,6 +339,16 @@
       return { ...base, ...MIC_PROCESSING_CONSTRAINTS };
     }
 
+    const CAMERA_RESOLUTION_CONSTRAINTS = {
+      width: { ideal: 640, max: 1280 },
+      height: { ideal: 480, max: 720 },
+    };
+
+    function buildCameraConstraints(deviceId) {
+      const base = deviceId ? { deviceId: { exact: deviceId } } : { facingMode: "user" };
+      return { ...base, ...CAMERA_RESOLUTION_CONSTRAINTS };
+    }
+
     function requireMediaDevices() {
       if (navigator.mediaDevices?.getUserMedia) return navigator.mediaDevices;
       const protocol = window.location.protocol;
@@ -696,6 +706,37 @@
       return mics;
     }
 
+    function useCameras(requestPermission) {
+      const [cameras, setCameras] = useState([]);
+      const refresh = useCallback(async (probeVideo) => {
+        let mediaDevices;
+        try {
+          mediaDevices = requireMediaDevices();
+        } catch (e) {
+          log("camera unavailable:", e.message || e);
+          setCameras([]);
+          return;
+        }
+        if (probeVideo) {
+          try {
+            const probe = await mediaDevices.getUserMedia({ video: true });
+            probe.getTracks().forEach((t) => t.stop());
+          } catch (e) {
+            log("camera permission:", e.message || e);
+          }
+        }
+        const devices = await mediaDevices.enumerateDevices();
+        setCameras(devices.filter((d) => d.kind === "videoinput"));
+      }, []);
+      useEffect(() => {
+        refresh(requestPermission);
+        const onChange = () => refresh(requestPermission);
+        navigator.mediaDevices?.addEventListener?.("devicechange", onChange);
+        return () => navigator.mediaDevices?.removeEventListener?.("devicechange", onChange);
+      }, [refresh, requestPermission]);
+      return cameras;
+    }
+
     function useMicLevel(track) {
       // Returns 0..1 short-term RMS of the supplied MediaStreamTrack.
       const [level, setLevel] = useState(0);
@@ -767,9 +808,10 @@
     }
 
     function ConfigCard({
-      mics, onStart, disabled, error,
+      mics, cameras, onStart, disabled, error,
       engine, setEngine,
       micId, setMicId,
+      cameraId, setCameraId,
       registry,
       avatarId, setAvatarId,
       avatarUploadName, setAvatarUploadName,
@@ -1002,6 +1044,19 @@
             </select>
           </div>
 
+          ${engine === "qwen" && qwenEnableVision === "true" ? html`
+            <div class="field">
+              <label for="camera">Camera</label>
+              <select id="camera" value=${cameraId} onChange=${(e) => setCameraId(e.target.value)}
+                      disabled=${cameras.length === 0}>
+                ${cameras.length === 0
+                  ? html`<option value="">(no camera detected)</option>`
+                  : cameras.map((c, i) => html`<option value=${c.deviceId}>${c.label || `Camera ${i + 1}`}</option>`)}
+              </select>
+              <div class="hint">用于视觉输入；开启会话前请选择要使用的摄像头。</div>
+            </div>
+          ` : null}
+
           ${error ? html`<div class="error-box">${error}</div>` : null}
 
           <div class="actions">
@@ -1011,7 +1066,11 @@
       `;
     }
 
-    function SessionModal({ open, status, micId, mics, onChangeMic, onClose, videoRef, audioRef, audioTrack, muted, onToggleMute }) {
+    function SessionModal({
+      open, status, micId, mics, onChangeMic,
+      cameraId, cameras, onChangeCamera, showCameraSelect,
+      onClose, videoRef, audioRef, audioTrack, muted, onToggleMute,
+    }) {
       const wrapRef = useRef(null);
       const modalRef = useRef(null);
       useEffect(() => {
@@ -1084,6 +1143,18 @@
                     ${mics.map((m, i) => html`<option value=${m.deviceId}>${m.label || `Microphone ${i + 1}`}</option>`)}
                   </select>
                 </div>
+                ${showCameraSelect ? html`
+                  <div class="mic-row" style="margin-top:8px;">
+                    <div></div>
+                    <select id="camera-live" class="mic-select" value=${cameraId}
+                            onChange=${(e) => onChangeCamera(e.target.value)}
+                            disabled=${cameras.length === 0}>
+                      ${cameras.length === 0
+                        ? html`<option value="">(no camera)</option>`
+                        : cameras.map((c, i) => html`<option value=${c.deviceId}>${c.label || `Camera ${i + 1}`}</option>`)}
+                    </select>
+                  </div>
+                ` : null}
               </div>
             </div>
           </div>
@@ -1138,6 +1209,9 @@
       const [avatarUploading, setAvatarUploading] = useState(false);
       const [avatarUploadHint, setAvatarUploadHint] = useState("");
       const [micId, setMicId] = useState("");
+      const [cameraId, setCameraId] = useState("");
+      const requestCameraPermission = engine === "qwen" && qwenEnableVision === "true";
+      const cameras = useCameras(requestCameraPermission);
 
       useEffect(() => {
         fetch("/stream-defaults")
@@ -1186,9 +1260,14 @@
       const audioRef = useRef(null);
       const pcRef = useRef(null);
       const senderRef = useRef(null);
+      const videoSenderRef = useRef(null);
       const streamRef = useRef(null);
 
       useEffect(() => { if (!micId && mics.length) setMicId(mics[0].deviceId); }, [mics]);
+      useEffect(() => {
+        if (!requestCameraPermission) return;
+        if (!cameraId && cameras.length) setCameraId(cameras[0].deviceId);
+      }, [cameras, cameraId, requestCameraPermission]);
       useEffect(() => {
         // If the saved avatar / background is no longer loaded by the renderer,
         // fall back to the first available one in that list.
@@ -1208,6 +1287,7 @@
         if (streamRef.current) for (const t of streamRef.current.getTracks()) t.stop();
         pcRef.current = null;
         senderRef.current = null;
+        videoSenderRef.current = null;
         streamRef.current = null;
         setAudioTrack(null);
         if (videoRef.current) videoRef.current.srcObject = null;
@@ -1397,13 +1477,12 @@
 
           const mediaDevices = requireMediaDevices();
           const enableVision = engine === "qwen" && qwenEnableVision === "true";
+          if (enableVision && cameras.length === 0) {
+            throw new Error("未检测到可用摄像头，请检查权限或设备连接");
+          }
           const localStream = await mediaDevices.getUserMedia({
             audio: buildMicConstraints(micId),
-            video: enableVision ? {
-              facingMode: "user",
-              width: { ideal: 640, max: 1280 },
-              height: { ideal: 480, max: 720 },
-            } : false,
+            video: enableVision ? buildCameraConstraints(cameraId) : false,
           });
           streamRef.current = localStream;
           const track = localStream.getAudioTracks()[0];
@@ -1411,8 +1490,8 @@
           if (enableVision) {
             const videoTrack = localStream.getVideoTracks()[0];
             if (videoTrack) {
-              pc.addTrack(videoTrack, localStream);
-              log("camera enabled for vision");
+              videoSenderRef.current = pc.addTrack(videoTrack, localStream);
+              log("camera enabled for vision:", videoTrack.label || cameraId);
             }
           }
           setAudioTrack(track);
@@ -1455,7 +1534,7 @@
           setStartError(e.message || String(e));
           stop();
         }
-      }, [active, micId, avatarId, backgroundId, engine, qwenEnableVision, stop, buildEngineConfig]);
+      }, [active, micId, cameraId, cameras, avatarId, backgroundId, engine, qwenEnableVision, stop, buildEngineConfig]);
 
       const switchMic = useCallback(async (deviceId) => {
         setMicId(deviceId);
@@ -1483,13 +1562,41 @@
         }
       }, [active, muted]);
 
+      const switchCamera = useCallback(async (deviceId) => {
+        setCameraId(deviceId);
+        if (!active || !videoSenderRef.current) return;
+        try {
+          const mediaDevices = requireMediaDevices();
+          const next = await mediaDevices.getUserMedia({
+            audio: false,
+            video: buildCameraConstraints(deviceId),
+          });
+          const newTrack = next.getVideoTracks()[0];
+          await videoSenderRef.current.replaceTrack(newTrack);
+          if (streamRef.current) {
+            for (const t of streamRef.current.getVideoTracks()) {
+              streamRef.current.removeTrack(t);
+              t.stop();
+            }
+            streamRef.current.addTrack(newTrack);
+          }
+          log("switched camera to", newTrack.label || deviceId);
+        } catch (e) {
+          log("switch camera failed:", e.message || e);
+        }
+      }, [active]);
+
+      const showCameraSelect = engine === "qwen" && qwenEnableVision === "true";
+
       return html`
         <div class="app">
           <h1>Local Stream</h1>
           <${ConfigCard}
             mics=${mics}
+            cameras=${cameras}
             engine=${engine} setEngine=${setEngine}
             micId=${micId} setMicId=${setMicId}
+            cameraId=${cameraId} setCameraId=${setCameraId}
             registry=${registry}
             avatarId=${avatarId} setAvatarId=${setAvatarId}
             avatarUploadName=${avatarUploadName} setAvatarUploadName=${setAvatarUploadName}
@@ -1523,6 +1630,8 @@
         <${SessionModal}
           open=${open} status=${status}
           mics=${mics} micId=${micId} onChangeMic=${switchMic}
+          cameraId=${cameraId} cameras=${cameras} onChangeCamera=${switchCamera}
+          showCameraSelect=${showCameraSelect}
           onClose=${stop}
           videoRef=${videoRef} audioRef=${audioRef}
           audioTrack=${audioTrack}
