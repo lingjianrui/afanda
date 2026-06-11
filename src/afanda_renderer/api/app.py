@@ -25,15 +25,17 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import re
 import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import anyio
+import cv2
 import numpy as np
 import uvicorn
 from anyio.streams.memory import MemoryObjectSendStream
-from fastapi import FastAPI, HTTPException, Query, Request, UploadFile
+from fastapi import FastAPI, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
 
 from afanda_renderer.api.load_balancing import keep_alive_worker
@@ -48,6 +50,21 @@ from afanda_renderer.utils.cuda_health import CudaHealthChecker
 LOG = logging.getLogger(__name__)
 
 _INT16_MAX = 32768.0
+_AVATAR_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$")
+
+
+def _sanitize_avatar_id(raw: str) -> str:
+    """Turn a user-supplied label into a safe avatar id stem."""
+    cleaned = re.sub(r"[^a-zA-Z0-9_-]+", "_", raw.strip()).strip("_")
+    if not cleaned or not _AVATAR_ID_RE.match(cleaned):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "avatar_id must be 1-64 chars, start with a letter or digit, "
+                "and contain only letters, digits, underscores, or hyphens"
+            ),
+        )
+    return cleaned
 
 
 def _bytes_to_float32(buf: bytes, expected_samples: int, field: str) -> np.ndarray:
@@ -254,6 +271,51 @@ async def process_audio_v3(
             "X-State-Length-Bytes": str(len(state_blob)),
         },
     )
+
+
+@app.post("/avatars")
+async def upload_avatar(
+    request: Request,
+    image: UploadFile,
+    avatar_id: str | None = Form(default=None),
+) -> dict[str, object]:
+    """Upload a portrait PNG/JPEG/WebP, persist it, and hot-load into the registry."""
+    pipeline: Pipeline = request.app.state.pipeline
+    registry: dict = request.app.state.registry
+
+    content = await image.read()
+    if not content:
+        raise HTTPException(status_code=400, detail="empty image")
+
+    buf = np.frombuffer(content, dtype=np.uint8)
+    img = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
+    if img is None:
+        raise HTTPException(status_code=400, detail="unsupported or corrupt image file")
+
+    if avatar_id is None or not avatar_id.strip():
+        stem = Path(image.filename or "avatar").stem
+        chosen_id = _sanitize_avatar_id(stem or "avatar")
+    else:
+        chosen_id = _sanitize_avatar_id(avatar_id)
+
+    portraits_dir: Path = pipeline._portraits_dir
+    dest = portraits_dir / f"{chosen_id}.png"
+    if not cv2.imwrite(str(dest), img):
+        raise HTTPException(status_code=500, detail="failed to save portrait")
+
+    try:
+        avatar = await run_in_thread(pipeline.register_avatar, chosen_id, dest)
+    except Exception as exc:
+        dest.unlink(missing_ok=True)
+        LOG.exception("avatar registration failed for %s", chosen_id)
+        raise HTTPException(
+            status_code=400,
+            detail=f"failed to register avatar: {exc}",
+        ) from exc
+
+    registry[chosen_id] = avatar
+    LOG.info("Registered avatar %s (%d total)", chosen_id, len(registry))
+    return {"avatar_id": chosen_id, "avatars": sorted(registry)}
 
 
 @app.get("/avatars")

@@ -28,7 +28,7 @@ import httpx
 import typer
 import uvicorn
 from aiortc import RTCConfiguration, RTCPeerConnection, RTCSessionDescription
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, Form, HTTPException, UploadFile
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel
 
@@ -240,6 +240,43 @@ def _make_app(
             if isinstance(backgrounds_list, list):
                 result["backgrounds"] = [str(b) for b in backgrounds_list]
         return result
+
+    @app.post("/avatars")
+    async def upload_avatar_route(
+        image: UploadFile,
+        avatar_id: str | None = Form(default=None),
+    ) -> dict[str, object]:
+        """Proxy avatar upload to the renderer so the browser can hot-load portraits."""
+        base = _renderer_base_url()
+        if not base:
+            raise HTTPException(status_code=503, detail="renderer URL not configured")
+        try:
+            content = await image.read()
+            files = {
+                "image": (
+                    image.filename or "avatar.png",
+                    content,
+                    image.content_type or "application/octet-stream",
+                )
+            }
+            data: dict[str, str] = {}
+            if avatar_id and avatar_id.strip():
+                data["avatar_id"] = avatar_id.strip()
+            async with httpx.AsyncClient(timeout=120.0) as http:
+                r = await http.post(f"{base}/avatars", files=files, data=data)
+                r.raise_for_status()
+                payload = r.json()
+        except httpx.HTTPStatusError as exc:
+            detail = exc.response.text[:500]
+            raise HTTPException(status_code=exc.response.status_code, detail=detail) from exc
+        except HTTPException:
+            raise
+        except Exception as exc:
+            _LOGGER.warning("renderer /avatars upload proxy failed", error=str(exc))
+            raise HTTPException(status_code=502, detail=f"renderer /avatars upload failed: {exc}") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=502, detail="renderer returned non-JSON response")
+        return payload
 
     @app.get("/stream-defaults")
     async def stream_defaults_route() -> dict[str, object]:

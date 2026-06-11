@@ -240,17 +240,39 @@ class Pipeline[StateT]:
             decode_engine=decode,
             normalizer=normalizer,
         )
-        return (
-            cls(
-                motion_generator=motion_generator,
-                stitch=stitch,
-                warp=warp,
-                decoder=decoder,
-                matting=matting,
-                backgrounds=backgrounds,
-            ),
-            registry,
+        pipeline = cls(
+            motion_generator=motion_generator,
+            stitch=stitch,
+            warp=warp,
+            decoder=decoder,
+            matting=matting,
+            backgrounds=backgrounds,
         )
+        pipeline._avatar_loader = loader
+        pipeline._portraits_dir = portraits_dir
+        return pipeline, registry
+
+    def register_avatar(
+        self,
+        avatar_id: str,
+        portrait_path: Path | str | None = None,
+    ) -> Avatar:
+        """Load a portrait from disk and return a ready ``Avatar``.
+
+        The caller is responsible for inserting the result into the process-wide
+        registry (e.g. ``app.state.registry`` on the HTTP server).
+        """
+        loader = getattr(self, "_avatar_loader", None)
+        portraits_dir = getattr(self, "_portraits_dir", None)
+        if loader is None or portraits_dir is None:
+            raise RuntimeError("Pipeline was not built via from_artifacts; cannot register avatars")
+
+        if portrait_path is None:
+            portrait_path = portraits_dir / f"{avatar_id}.png"
+        portrait_path = Path(portrait_path)
+        if not portrait_path.is_file():
+            raise FileNotFoundError(f"No portrait at {portrait_path}")
+        return loader.load(portrait_path, avatar_id=avatar_id)
 
     def initial_state(self, avatar: Avatar) -> StateT:
         return self._motion_generator.initial_state(avatar)

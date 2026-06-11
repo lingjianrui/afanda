@@ -64,6 +64,9 @@
     }
     select:focus, input:focus, textarea:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
     .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+    .upload-row { display: flex; gap: 8px; align-items: stretch; }
+    .upload-row input[type="text"] { flex: 1 1 40%; min-width: 0; }
+    .upload-row input[type="file"] { flex: 1 1 60%; min-width: 0; padding: 6px 8px; }
     .tabs {
       display: flex;
       gap: 4px;
@@ -635,27 +638,25 @@
       // /avatars returns both lists in one round-trip — the renderer loads
       // both avatars and backgrounds at startup and surfaces them together.
       const [state, setState] = useState({ status: "loading", avatars: [], backgrounds: [], error: null });
-      useEffect(() => {
-        let alive = true;
-        (async () => {
-          try {
-            const r = await fetch("/avatars");
-            if (!r.ok) throw new Error(`/avatars ${r.status}`);
-            const data = await r.json();
-            if (!alive) return;
-            setState({
-              status: data.error ? "error" : "ok",
-              avatars: Array.isArray(data.avatars) ? data.avatars : [],
-              backgrounds: Array.isArray(data.backgrounds) ? data.backgrounds : [],
-              error: data.error || null,
-            });
-          } catch (e) {
-            if (alive) setState({ status: "error", avatars: [], backgrounds: [], error: e.message || String(e) });
-          }
-        })();
-        return () => { alive = false; };
+      const refresh = useCallback(async () => {
+        setState((prev) => ({ ...prev, status: "loading" }));
+        const r = await fetch("/avatars");
+        if (!r.ok) throw new Error(`/avatars ${r.status}`);
+        const data = await r.json();
+        setState({
+          status: data.error ? "error" : "ok",
+          avatars: Array.isArray(data.avatars) ? data.avatars : [],
+          backgrounds: Array.isArray(data.backgrounds) ? data.backgrounds : [],
+          error: data.error || null,
+        });
+        return data;
       }, []);
-      return state;
+      useEffect(() => {
+        refresh().catch((e) => {
+          setState({ status: "error", avatars: [], backgrounds: [], error: e.message || String(e) });
+        });
+      }, [refresh]);
+      return { ...state, refresh };
     }
 
     function useMics() {
@@ -763,6 +764,8 @@
       micId, setMicId,
       registry,
       avatarId, setAvatarId,
+      avatarUploadName, setAvatarUploadName,
+      avatarUploading, avatarUploadHint, onAvatarUpload,
       backgroundId, setBackgroundId,
       openaiKey, setOpenaiKey,
       openaiBaseUrl, setOpenaiBaseUrl,
@@ -792,7 +795,22 @@
       return html`
         <div class="card">
           <div class="field">
-            <label for="avatar">Avatar</label>
+            <label for="avatar-upload">上传 Avatar 图片</label>
+            <div class="upload-row">
+              <input id="avatar-upload-name" type="text" value=${avatarUploadName}
+                     onInput=${(e) => setAvatarUploadName(e.target.value)}
+                     placeholder="角色 ID（可选）"
+                     disabled=${avatarUploading || disabled} />
+              <input id="avatar-upload" type="file"
+                     accept="image/png,image/jpeg,image/webp,.png,.jpg,.jpeg,.webp"
+                     onChange=${onAvatarUpload}
+                     disabled=${avatarUploading || disabled} />
+            </div>
+            <div class="hint">${avatarUploadHint || "支持 PNG / JPEG / WebP，上传后自动加入下方角色列表。"}</div>
+          </div>
+
+          <div class="field">
+            <label for="avatar">角色 (Avatar)</label>
             <select id="avatar" value=${avatarId}
                     onChange=${(e) => setAvatarId(e.target.value)}
                     disabled=${avatarOptions.length === 0}>
@@ -1097,6 +1115,9 @@
       const [qwenPrompt, setQwenPrompt] = useLocalStorage("qwen_prompt", DEFAULT_OPENAI_PROMPT);
       const [cartesiaKey, setCartesiaKey] = useLocalStorage("cartesia_api_key", "");
       const [cartesiaAgentId, setCartesiaAgentId] = useLocalStorage("cartesia_agent_id", "");
+      const [avatarUploadName, setAvatarUploadName] = useLocalStorage("avatar_upload_name", "");
+      const [avatarUploading, setAvatarUploading] = useState(false);
+      const [avatarUploadHint, setAvatarUploadHint] = useState("");
       const [micId, setMicId] = useState("");
 
       useEffect(() => {
@@ -1252,6 +1273,38 @@
         cartesiaKey, cartesiaAgentId,
       ]);
 
+      const onAvatarUpload = useCallback(async (e) => {
+        const file = e.target.files && e.target.files[0];
+        e.target.value = "";
+        if (!file) return;
+        setAvatarUploading(true);
+        setAvatarUploadHint("正在上传并注册 Avatar…");
+        setStartError(null);
+        try {
+          const form = new FormData();
+          form.append("image", file);
+          const customId = (avatarUploadName || "").trim();
+          if (customId) form.append("avatar_id", customId);
+          const r = await fetch("/avatars", { method: "POST", body: form });
+          if (!r.ok) {
+            const body = await r.text();
+            throw new Error(`上传失败 (${r.status}): ${body}`);
+          }
+          const data = await r.json();
+          await registry.refresh();
+          const newId = data.avatar_id;
+          if (newId) setAvatarId(newId);
+          setAvatarUploadHint(newId ? `已加载角色: ${newId}` : "上传成功");
+          log("avatar uploaded:", newId || file.name);
+        } catch (err) {
+          setAvatarUploadHint("");
+          setStartError(err.message || String(err));
+          log("avatar upload failed:", err.message || err);
+        } finally {
+          setAvatarUploading(false);
+        }
+      }, [avatarUploadName, registry, setAvatarId]);
+
       const onQwenCloneFile = useCallback(async (e) => {
         const file = e.target.files && e.target.files[0];
         if (!file) {
@@ -1400,6 +1453,9 @@
             micId=${micId} setMicId=${setMicId}
             registry=${registry}
             avatarId=${avatarId} setAvatarId=${setAvatarId}
+            avatarUploadName=${avatarUploadName} setAvatarUploadName=${setAvatarUploadName}
+            avatarUploading=${avatarUploading} avatarUploadHint=${avatarUploadHint}
+            onAvatarUpload=${onAvatarUpload}
             backgroundId=${backgroundId} setBackgroundId=${setBackgroundId}
             openaiKey=${openaiKey} setOpenaiKey=${setOpenaiKey}
             openaiBaseUrl=${openaiBaseUrl} setOpenaiBaseUrl=${setOpenaiBaseUrl}
