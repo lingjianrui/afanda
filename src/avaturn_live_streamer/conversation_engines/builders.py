@@ -100,6 +100,7 @@ class QwenEngineOptions(BaseModel):
     voice_clone_mime_type: str | None = None
     voice_clone_file_path: str | None = None
     prompt: str = DEFAULT_OPENAI_PROMPT
+    enable_vision: bool = False
 
 
 EngineOptions = Annotated[
@@ -205,7 +206,7 @@ def _resolve_voice_clone_file(path_str: str) -> tuple[bytes, str]:
     return path.read_bytes(), mime_type_for_filename(path.name)
 
 
-def qwen_env_defaults() -> dict[str, str]:
+def qwen_env_defaults() -> dict[str, str | bool]:
     """Optional Qwen defaults from env for ``pixi run interactive-demo`` + ``.env``."""
     keys = {
         "voice_mode": "QWEN__VOICE_MODE",
@@ -214,11 +215,15 @@ def qwen_env_defaults() -> dict[str, str]:
         "endpoint": "QWEN__ENDPOINT",
         "voice_clone_name": "QWEN__VOICE_CLONE_NAME",
         "voice_clone_file_path": "QWEN__VOICE_CLONE_FILE",
+        "enable_vision": "QWEN__ENABLE_VISION",
     }
-    out: dict[str, str] = {}
+    out: dict[str, str | bool] = {}
     for field, env_name in keys.items():
         if val := os.environ.get(env_name, "").strip():
-            out[field] = val
+            if field == "enable_vision":
+                out[field] = val.lower() in ("1", "true", "yes", "on")
+            else:
+                out[field] = val
     return out
 
 
@@ -288,6 +293,7 @@ async def build_qwen(
         model=options.model.strip() or DEFAULT_QWEN_MODEL,
         voice=voice,
         instructions=options.prompt,
+        enable_vision=options.enable_vision,
     )
     return cfg, QwenOmniRealtimeClient(cfg).run
 

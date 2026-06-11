@@ -115,6 +115,14 @@
     .btn:hover { background: var(--accent-hover); }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; }
     .actions { display: flex; justify-content: flex-end; margin-top: 8px; }
+    .checkbox-row {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      cursor: pointer;
+      font-weight: 500;
+    }
+    .checkbox-row input { width: auto; margin: 0; cursor: pointer; }
 
     .modal-backdrop {
       position: fixed;
@@ -782,6 +790,7 @@
       qwenCloneFileName, setQwenCloneFileName,
       onQwenCloneFile,
       qwenPrompt, setQwenPrompt,
+      qwenEnableVision, setQwenEnableVision,
       cartesiaKey, setCartesiaKey,
       cartesiaAgentId, setCartesiaAgentId,
     }) {
@@ -950,6 +959,15 @@
                 </div>
               ` : null}
               <div class="field">
+                <label class="checkbox-row">
+                  <input id="qwen-enable-vision" type="checkbox"
+                         checked=${qwenEnableVision === "true"}
+                         onChange=${(e) => setQwenEnableVision(e.target.checked ? "true" : "false")} />
+                  启用摄像头视觉
+                </label>
+                <div class="hint">需使用支持视觉的模型（如 qwen3.5-omni-plus-realtime）。开启后会采集摄像头画面，约每秒 1 帧发送给模型。</div>
+              </div>
+              <div class="field">
                 <label for="qwen-prompt">System Prompt</label>
                 <textarea id="qwen-prompt" rows="6" value=${qwenPrompt}
                           onInput=${(e) => setQwenPrompt(e.target.value)}
@@ -1113,6 +1131,7 @@
       const [qwenCloneAudioB64, setQwenCloneAudioB64] = useState("");
       const [qwenCloneMimeType, setQwenCloneMimeType] = useState("");
       const [qwenPrompt, setQwenPrompt] = useLocalStorage("qwen_prompt", DEFAULT_OPENAI_PROMPT);
+      const [qwenEnableVision, setQwenEnableVision] = useLocalStorage("qwen_enable_vision", "false");
       const [cartesiaKey, setCartesiaKey] = useLocalStorage("cartesia_api_key", "");
       const [cartesiaAgentId, setCartesiaAgentId] = useLocalStorage("cartesia_agent_id", "");
       const [avatarUploadName, setAvatarUploadName] = useLocalStorage("avatar_upload_name", "");
@@ -1136,6 +1155,12 @@
             if (q.voice_clone_name) setQwenCloneName(q.voice_clone_name);
             if (q.voice_clone_file_path) {
               setQwenCloneFileName(`${q.voice_clone_file_path} (server .env)`);
+            }
+            if (q.enable_vision) {
+              const on = String(q.enable_vision).toLowerCase();
+              if (on === "true" || on === "1" || on === "yes" || on === "on") {
+                setQwenEnableVision("true");
+              }
             }
           })
           .catch(() => {});
@@ -1247,6 +1272,7 @@
             model: (qwenModel || "").trim() || defaultModel,
             voice_mode: voiceMode,
             prompt: qwenPrompt || "",
+            enable_vision: qwenEnableVision === "true",
           };
           if (voiceMode === "preset") {
             config.voice = (qwenVoice || "").trim() || DEFAULT_QWEN_VOICE;
@@ -1270,6 +1296,7 @@
         openaiKey, openaiBaseUrl, openaiModel, openaiVoice, openaiPrompt,
         qwenKey, qwenEndpoint, qwenModel, qwenVoice, qwenVoiceMode,
         qwenClonedVoiceId, qwenCloneName, qwenCloneAudioB64, qwenCloneMimeType, qwenPrompt,
+        qwenEnableVision,
         cartesiaKey, cartesiaAgentId,
       ]);
 
@@ -1369,13 +1396,25 @@
           };
 
           const mediaDevices = requireMediaDevices();
+          const enableVision = engine === "qwen" && qwenEnableVision === "true";
           const localStream = await mediaDevices.getUserMedia({
             audio: buildMicConstraints(micId),
-            video: false,
+            video: enableVision ? {
+              facingMode: "user",
+              width: { ideal: 640, max: 1280 },
+              height: { ideal: 480, max: 720 },
+            } : false,
           });
           streamRef.current = localStream;
           const track = localStream.getAudioTracks()[0];
           senderRef.current = pc.addTrack(track, localStream);
+          if (enableVision) {
+            const videoTrack = localStream.getVideoTracks()[0];
+            if (videoTrack) {
+              pc.addTrack(videoTrack, localStream);
+              log("camera enabled for vision");
+            }
+          }
           setAudioTrack(track);
 
           // Server sends both audio and video back, but we already have a
@@ -1416,7 +1455,7 @@
           setStartError(e.message || String(e));
           stop();
         }
-      }, [active, micId, avatarId, backgroundId, stop, buildEngineConfig]);
+      }, [active, micId, avatarId, backgroundId, engine, qwenEnableVision, stop, buildEngineConfig]);
 
       const switchMic = useCallback(async (deviceId) => {
         setMicId(deviceId);
@@ -1472,6 +1511,7 @@
             qwenCloneFileName=${qwenCloneFileName} setQwenCloneFileName=${setQwenCloneFileName}
             onQwenCloneFile=${onQwenCloneFile}
             qwenPrompt=${qwenPrompt} setQwenPrompt=${setQwenPrompt}
+            qwenEnableVision=${qwenEnableVision} setQwenEnableVision=${setQwenEnableVision}
             cartesiaKey=${cartesiaKey} setCartesiaKey=${setCartesiaKey}
             cartesiaAgentId=${cartesiaAgentId} setCartesiaAgentId=${setCartesiaAgentId}
             error=${startError}

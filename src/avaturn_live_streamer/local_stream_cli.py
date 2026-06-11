@@ -45,6 +45,9 @@ from avaturn_live_streamer.conversation_engines.builders import (
     build_engine,
     qwen_env_defaults,
 )
+from avaturn_live_streamer.conversation_engines.configs import (
+    QwenOmniRealtimeConversationEngineConfig,
+)
 from avaturn_live_streamer.event_bus import EventBus
 from avaturn_live_streamer.events import Shutdown
 from avaturn_live_streamer.localrtc import (
@@ -164,9 +167,13 @@ async def _run_session(
     )
     _engine_config, engine_run = built_engine
     pixel_format = renderer_config.pixel_format
+    enable_vision = (
+        isinstance(_engine_config, QwenOmniRealtimeConversationEngineConfig)
+        and _engine_config.enable_vision
+    )
 
     rendering = RenderingWorklet(renderer_registry, renderer_config)
-    peer_worklet = LocalRTCWorklet(peer, pixel_format)
+    peer_worklet = LocalRTCWorklet(peer, pixel_format, enable_vision=enable_vision)
     timeout_worklet = TimeoutWorklet(idle_timeout, max_duration)
 
     needs_stop = asyncio.Event()

@@ -62,6 +62,13 @@ class UserSpeechReceived:
 
 
 @dataclass(slots=True)
+class UserVisionFrameReceived:
+    """Published when a camera frame is received from RTC (JPEG bytes)."""
+
+    jpeg: bytes
+
+
+@dataclass(slots=True)
 class UserSpeechStreamStart:
     """Published when user audio data becomes available (first chunk received)."""
 

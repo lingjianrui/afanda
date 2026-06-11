@@ -14,6 +14,7 @@ applies the hybrid nominal/wall-clock rule); the track does not re-stamp.
 
 import asyncio
 import fractions
+import time
 from typing import Literal
 
 import av
@@ -25,11 +26,14 @@ from av.frame import Frame as AvFrame
 from avaturn_live_streamer.core.logs import get_logger
 from avaturn_live_streamer import constant
 from avaturn_live_streamer.speech.speech_buffer import SpeechBuffer
+from avaturn_live_streamer.utils.async_utils import run_in_thread
+from avaturn_live_streamer.utils.vision import video_frame_to_jpeg
 
 _LOGGER = get_logger()
 
 _AUDIO_TIME_BASE = fractions.Fraction(1, constant.NATIVE_SPEECH_SAMPLE_RATE)
 _AUDIO_SAMPLES_PER_FRAME = constant.NATIVE_SPEECH_SAMPLE_RATE // 50  # 20ms
+_VISION_FRAME_INTERVAL_S = 1.0
 
 type ConnectionState = Literal["new", "connecting", "connected", "disconnected", "failed", "closed"]
 
@@ -104,6 +108,7 @@ class LocalRTC:
         self._video_track = _QueuedVideoTrack()
         self._audio_track = _QueuedAudioTrack()
         self._inbound_audio: asyncio.Queue[SpeechBuffer] = asyncio.Queue(maxsize=600)
+        self._inbound_vision: asyncio.Queue[bytes] = asyncio.Queue(maxsize=4)
         self._connection_state: ConnectionState = "new"
         self._state_waiters: list[asyncio.Future[ConnectionState]] = []
 
@@ -123,11 +128,15 @@ class LocalRTC:
                 w.set_result(state)
 
     def _on_track(self, track: MediaStreamTrack) -> None:
-        if track.kind != "audio":
-            _LOGGER.debug("localrtc ignoring inbound track", kind=track.kind)
+        if track.kind == "audio":
+            _LOGGER.info("localrtc inbound audio track attached")
+            asyncio.create_task(self._consume_inbound_audio(track))
             return
-        _LOGGER.info("localrtc inbound audio track attached")
-        asyncio.create_task(self._consume_inbound_audio(track))
+        if track.kind == "video":
+            _LOGGER.info("localrtc inbound video track attached")
+            asyncio.create_task(self._consume_inbound_video(track))
+            return
+        _LOGGER.debug("localrtc ignoring inbound track", kind=track.kind)
 
     async def _consume_inbound_audio(self, track: MediaStreamTrack) -> None:
         target_sr = constant.NATIVE_SPEECH_SAMPLE_RATE
@@ -155,6 +164,33 @@ class LocalRTC:
             _LOGGER.info("localrtc inbound audio track ended")
         except Exception:
             _LOGGER.exception("localrtc inbound audio loop crashed")
+
+    async def _consume_inbound_video(self, track: MediaStreamTrack) -> None:
+        last_sent_at = 0.0
+        try:
+            while True:
+                frame = await track.recv()
+                if not isinstance(frame, av.VideoFrame):
+                    continue
+                now = time.monotonic()
+                if now - last_sent_at < _VISION_FRAME_INTERVAL_S:
+                    continue
+                jpeg = await run_in_thread(video_frame_to_jpeg, frame)
+                if jpeg is None:
+                    continue
+                last_sent_at = now
+                if self._inbound_vision.full():
+                    try:
+                        self._inbound_vision.get_nowait()
+                    except asyncio.QueueEmpty:
+                        pass
+                await self._inbound_vision.put(jpeg)
+        except (asyncio.CancelledError, ConnectionError):
+            raise
+        except MediaStreamError:
+            _LOGGER.info("localrtc inbound video track ended")
+        except Exception:
+            _LOGGER.exception("localrtc inbound video loop crashed")
 
     @property
     def connection_state(self) -> ConnectionState:
@@ -193,6 +229,9 @@ class LocalRTC:
 
     async def recv_audio_chunk(self) -> SpeechBuffer:
         return await self._inbound_audio.get()
+
+    async def recv_vision_frame(self) -> bytes:
+        return await self._inbound_vision.get()
 
     async def close(self) -> None:
         await self.pc.close()

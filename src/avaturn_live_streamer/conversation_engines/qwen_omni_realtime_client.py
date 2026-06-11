@@ -31,6 +31,7 @@ from avaturn_live_streamer.events import (
     Shutdown,
     TextEchoEnqueueText,
     UserSpeechReceived,
+    UserVisionFrameReceived,
 )
 from avaturn_live_streamer.speech.speech_buffer import SpeechBuffer
 from avaturn_live_streamer.utils.async_utils import run_in_thread
@@ -66,6 +67,7 @@ def _qwen_ws_url(endpoint: str, model: str) -> str:
 class QwenOmniRealtimeClient:
     _config: QwenOmniRealtimeConversationEngineConfig
     _current_response_id: str | None = None
+    _has_sent_audio: bool = False
 
     @asynccontextmanager
     async def _connect(self) -> AsyncGenerator[ClientConnection, None]:
@@ -123,6 +125,23 @@ class QwenOmniRealtimeClient:
                     "event_id": _event_id(),
                     "type": "input_audio_buffer.append",
                     "audio": b64encode(audio).decode(),
+                }
+            )
+        )
+        self._has_sent_audio = True
+
+    async def _send_vision_frame(self, ws: ClientConnection, jpeg: bytes) -> None:
+        if not self._config.enable_vision:
+            return
+        if not self._has_sent_audio:
+            _LOGGER.debug("Skipping vision frame until audio has been sent")
+            return
+        await ws.send(
+            json.dumps(
+                {
+                    "event_id": _event_id(),
+                    "type": "input_image_buffer.append",
+                    "image": b64encode(jpeg).decode(),
                 }
             )
         )
@@ -202,11 +221,10 @@ class QwenOmniRealtimeClient:
                     pass
 
     async def _handle_bus_events(self, bus: EventBus, ws: ClientConnection) -> None:
-        async with bus.subscribe(
-            TextEchoEnqueueText,
-            UserSpeechReceived,
-            Shutdown,
-        ) as sub:
+        event_types = [TextEchoEnqueueText, UserSpeechReceived, Shutdown]
+        if self._config.enable_vision:
+            event_types.append(UserVisionFrameReceived)
+        async with bus.subscribe(*event_types) as sub:
             bus.ready()
             async for event in sub:
                 match event:
@@ -217,6 +235,8 @@ class QwenOmniRealtimeClient:
                         )
                     case UserSpeechReceived(buffer=buf):
                         await self._send_speech(ws, buf)
+                    case UserVisionFrameReceived(jpeg=jpeg):
+                        await self._send_vision_frame(ws, jpeg)
                     case Shutdown():
                         await ws.close()
                         return

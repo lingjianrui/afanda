@@ -34,6 +34,7 @@ from avaturn_live_streamer.events import (
     UserSpeechReceived,
     UserSpeechStreamEnd,
     UserSpeechStreamStart,
+    UserVisionFrameReceived,
     VideoFrameGenerated,
 )
 from avaturn_live_streamer.localrtc.peer import LocalRTC
@@ -59,6 +60,7 @@ def _build_video_frame(buffer: bytes, pixel_format: PixelFormat) -> av.VideoFram
 class LocalRTCWorklet:
     _peer: LocalRTC
     _pixel_format: PixelFormat
+    _enable_vision: bool = False
 
     @async_log_entry_exit
     async def run(self, bus: EventBus, clocks: StreamClocks) -> None:
@@ -72,6 +74,11 @@ class LocalRTCWorklet:
             main_task = tg.create_task(self._video_to_peer_worker(bus.clone(), clocks))
             lifecycle_task = tg.create_task(self._participant_lifecycle_worker(bus.clone()))
             user_audio_task = tg.create_task(self._read_user_audio_loop(bus, clocks))
+            if self._enable_vision:
+                tg.create_task(
+                    self._read_user_vision_loop(bus),
+                    name="LocalRTCWorklet._read_user_vision_loop",
+                )
             bus.ready()
 
             await bus.publish(ParticipantJoined(participant_id="local"))
@@ -187,3 +194,10 @@ class LocalRTCWorklet:
                 next_chunk_at += chunk_duration
             _LOGGER.info("User audio stream ended (no more data)")
             await bus.publish(UserSpeechStreamEnd())
+
+    async def _read_user_vision_loop(self, bus: EventBus) -> None:
+        """Forward camera JPEG frames from the browser to conversation engines."""
+        bus.ready()
+        while True:
+            jpeg = await self._peer.recv_vision_frame()
+            await bus.publish(UserVisionFrameReceived(jpeg=jpeg))

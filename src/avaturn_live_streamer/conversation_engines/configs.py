@@ -42,6 +42,7 @@ class QwenOmniRealtimeConversationEngineConfig(BaseModel):
     model: str
     voice: str
     instructions: str
+    enable_vision: bool = False
 
     model_config = ConfigDict(title="QwenOmniRealtimeCEConfig")
 
