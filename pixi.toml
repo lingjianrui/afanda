@@ -87,6 +87,7 @@ afanda-renderer = { path = ".", editable = true }
 
 fastapi = ">=0.111.0"
 uvicorn = ">=0.30.6"
+python-multipart = ">=0.0.20,<0.0.21"
 numpy = ">=2.1.1"
 pydantic-settings = ">=2.10.1"
 httpx = ">=0.26.0"
