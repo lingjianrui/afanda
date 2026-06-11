@@ -1476,7 +1476,7 @@
           };
 
           const mediaDevices = requireMediaDevices();
-          const enableVision = engine === "qwen" && qwenEnableVision === "true";
+          const enableVision = Boolean(engineConfig.enable_vision);
           if (enableVision && cameras.length === 0) {
             throw new Error("未检测到可用摄像头，请检查权限或设备连接");
           }

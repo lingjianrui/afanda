@@ -34,6 +34,8 @@ _LOGGER = get_logger()
 _AUDIO_TIME_BASE = fractions.Fraction(1, constant.NATIVE_SPEECH_SAMPLE_RATE)
 _AUDIO_SAMPLES_PER_FRAME = constant.NATIVE_SPEECH_SAMPLE_RATE // 50  # 20ms
 _VISION_FRAME_INTERVAL_S = 1.0
+# Empty payload signals the vision consumer to exit (not a valid JPEG).
+_VISION_QUEUE_SENTINEL = b""
 
 type ConnectionState = Literal["new", "connecting", "connected", "disconnected", "failed", "closed"]
 
@@ -165,20 +167,34 @@ class LocalRTC:
         except Exception:
             _LOGGER.exception("localrtc inbound audio loop crashed")
 
+    def _signal_vision_consumer_end(self) -> None:
+        try:
+            self._inbound_vision.put_nowait(_VISION_QUEUE_SENTINEL)
+        except asyncio.QueueFull:
+            try:
+                self._inbound_vision.get_nowait()
+            except asyncio.QueueEmpty:
+                pass
+            try:
+                self._inbound_vision.put_nowait(_VISION_QUEUE_SENTINEL)
+            except asyncio.QueueFull:
+                pass
+
     async def _consume_inbound_video(self, track: MediaStreamTrack) -> None:
-        last_sent_at = 0.0
+        last_sample_at = 0.0
         try:
             while True:
                 frame = await track.recv()
                 if not isinstance(frame, av.VideoFrame):
                     continue
                 now = time.monotonic()
-                if now - last_sent_at < _VISION_FRAME_INTERVAL_S:
+                if now - last_sample_at < _VISION_FRAME_INTERVAL_S:
                     continue
+                # Rate-limit sampling even when JPEG encode fails.
+                last_sample_at = now
                 jpeg = await run_in_thread(video_frame_to_jpeg, frame)
                 if jpeg is None:
                     continue
-                last_sent_at = now
                 if self._inbound_vision.full():
                     try:
                         self._inbound_vision.get_nowait()
@@ -191,6 +207,8 @@ class LocalRTC:
             _LOGGER.info("localrtc inbound video track ended")
         except Exception:
             _LOGGER.exception("localrtc inbound video loop crashed")
+        finally:
+            self._signal_vision_consumer_end()
 
     @property
     def connection_state(self) -> ConnectionState:
@@ -234,4 +252,5 @@ class LocalRTC:
         return await self._inbound_vision.get()
 
     async def close(self) -> None:
+        self._signal_vision_consumer_end()
         await self.pc.close()

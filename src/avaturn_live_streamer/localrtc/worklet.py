@@ -70,12 +70,13 @@ class LocalRTCWorklet:
         # -- potentially many seconds before media can actually flow.
         await self._peer.wait_connected(timeout=30.0)
 
+        vision_task = None
         async with TaskGroup() as tg:
             main_task = tg.create_task(self._video_to_peer_worker(bus.clone(), clocks))
             lifecycle_task = tg.create_task(self._participant_lifecycle_worker(bus.clone()))
             user_audio_task = tg.create_task(self._read_user_audio_loop(bus, clocks))
             if self._enable_vision:
-                tg.create_task(
+                vision_task = tg.create_task(
                     self._read_user_vision_loop(bus),
                     name="LocalRTCWorklet._read_user_vision_loop",
                 )
@@ -85,6 +86,8 @@ class LocalRTCWorklet:
 
             await main_task
             await cancel_and_wait_completion(user_audio_task)
+            if vision_task is not None and not vision_task.done():
+                await cancel_and_wait_completion(vision_task)
             # The lifecycle worker only exits on a peer state change; on a
             # bus-driven shutdown (timeout, etc.) it would block the TaskGroup
             # forever, preventing peer.close() upstream — which in turn keeps
@@ -197,7 +200,8 @@ class LocalRTCWorklet:
 
     async def _read_user_vision_loop(self, bus: EventBus) -> None:
         """Forward camera JPEG frames from the browser to conversation engines."""
-        bus.ready()
         while True:
             jpeg = await self._peer.recv_vision_frame()
+            if not jpeg:
+                return
             await bus.publish(UserVisionFrameReceived(jpeg=jpeg))
